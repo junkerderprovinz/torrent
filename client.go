@@ -616,7 +616,7 @@ func (cl *Client) Close() (errs []error) {
 	// Can we not modify cl.torrents as we delete from it?
 	panicif.NotZero(len(cl.torrents))
 	panicif.NotZero(len(cl.torrentsByShortHash))
-	cl.regularTrackerAnnounceDispatcher.closeTrackerClients()
+	stoppedSent := cl.regularTrackerAnnounceDispatcher.sendStopped()
 	cl.clearPortMappings()
 	for i := range cl.onClose {
 		cl.onClose[len(cl.onClose)-1-i]()
@@ -624,6 +624,7 @@ func (cl *Client) Close() (errs []error) {
 	cl.unlock()
 	cl.event.Broadcast()
 	closeGroup.Wait() // defer is LIFO. We want to Wait() after cl.unlock()
+	cl.regularTrackerAnnounceDispatcher.close(stoppedSent)
 	return
 }
 
