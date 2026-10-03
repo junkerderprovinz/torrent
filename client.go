@@ -616,6 +616,7 @@ func (cl *Client) Close() (errs []error) {
 	// Can we not modify cl.torrents as we delete from it?
 	panicif.NotZero(len(cl.torrents))
 	panicif.NotZero(len(cl.torrentsByShortHash))
+	cl.regularTrackerAnnounceDispatcher.closeTrackerClients()
 	cl.clearPortMappings()
 	for i := range cl.onClose {
 		cl.onClose[len(cl.onClose)-1-i]()

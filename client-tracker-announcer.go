@@ -973,6 +973,14 @@ func (me *regularTrackerAnnounceDispatcher) initTrackerClient(
 	g.MapMustAssignNew(me.trackerClients, urlStr, &value)
 }
 
+// A UDP tracker client holds a socket, from TrackerListenPacket if one is configured, until it is
+// closed.
+func (me *regularTrackerAnnounceDispatcher) closeTrackerClients() {
+	for _, v := range me.trackerClients {
+		v.client.Close()
+	}
+}
+
 // Returns nil if the Torrent has been GCd. Use this lazily as a way to stop caring about announcing
 // something, if we don't get to sending Completed or error in time.
 func (me *regularTrackerAnnounceDispatcher) getTorrentForAnnounceRequest(ih shortInfohash) *Torrent {
