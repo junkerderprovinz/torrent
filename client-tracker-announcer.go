@@ -554,7 +554,20 @@ func (me *regularTrackerAnnounceDispatcher) finishedAnnounce(key torrentTrackerA
 	me.trackerAnnouncing.Update(key.url, func(i int) int {
 		return i - 1
 	})
+	me.forgetIfDone(key)
 	me.updateTimer()
+}
+
+// Removes the announce data once there is nothing left to announce for a dropped torrent. A zero
+// When counts as overdue, so the record would head its tracker forever and leave the timer with
+// nothing to wait for, stopping the announces of every other torrent.
+func (me *regularTrackerAnnounceDispatcher) forgetIfDone(key torrentTrackerAnnouncerKey) {
+	input, ok := me.announceData.Get(key)
+	if !ok || input.active || !input.When.IsZero() {
+		return
+	}
+	me.announceData.Delete(key)
+	delete(me.announceStates, key)
 }
 
 func (me *regularTrackerAnnounceDispatcher) syncAnnounceState(key torrentTrackerAnnouncerKey) {
@@ -580,7 +593,13 @@ func (me *regularTrackerAnnounceDispatcher) updateTorrentInput(t *Torrent) {
 				return av
 			},
 		)
-		panicif.False(res.Exists)
+		if !res.Exists {
+			// Forgotten earlier, which only happens once the torrent is dropped.
+			panicif.False(t.isDropped())
+			delete(t.regularTrackerAnnounceState, key)
+			continue
+		}
+		me.forgetIfDone(key)
 	}
 }
 
