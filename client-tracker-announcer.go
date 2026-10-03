@@ -440,12 +440,13 @@ func (me *regularTrackerAnnounceDispatcher) step() mytimer.TimeValue {
 }
 
 func (me *regularTrackerAnnounceDispatcher) addKey(key torrentTrackerAnnouncerKey) {
-	if me.announceData.ContainsKey(key) {
-		return
-	}
 	t := me.torrentFromShortInfohash(key.ShortInfohash)
 	if t == nil {
 		// Crude, but the torrent was already dropped. We probably called AddTrackers late.
+		return
+	}
+	if me.announceData.ContainsKey(key) {
+		me.takeOverKey(key, t)
 		return
 	}
 	g.MakeMapIfNil(&me.torrentForAnnounceRequests)
@@ -461,6 +462,20 @@ func (me *regularTrackerAnnounceDispatcher) addKey(key torrentTrackerAnnouncerKe
 		nextAnnounceStateInput: me.makeAnnounceStateInput(key),
 		infohashActive:         g.OptionFromTuple(me.infohashAnnouncing.Get(key.ShortInfohash)).Value.count,
 	})
+	me.updateTimer()
+}
+
+// Gives the record left by a dropped torrent with the same infohash, whose stopped announce has not
+// gone out yet, to t. The record would otherwise keep announcing for the dropped torrent, and once
+// that is collected, not at all. t starts over with a started announce of its own.
+func (me *regularTrackerAnnounceDispatcher) takeOverKey(key torrentTrackerAnnouncerKey, t *Torrent) {
+	me.torrentForAnnounceRequests[key.ShortInfohash] = weak.Make(t)
+	me.announceStates[key] = g.PtrTo(announceState{})
+	panicif.False(me.announceData.Update(key, func(av nextAnnounceInput) nextAnnounceInput {
+		av.torrent = me.makeTorrentInput(t)
+		av.nextAnnounceStateInput = me.makeAnnounceStateInput(key)
+		return av
+	}).Exists)
 	me.updateTimer()
 }
 
@@ -583,6 +598,11 @@ func (me *regularTrackerAnnounceDispatcher) updateTorrentInput(t *Torrent) {
 	for key := range t.regularTrackerAnnounceState {
 		panicif.Zero(key.url)
 		panicif.Zero(key.ShortInfohash)
+		if live := me.torrentFromShortInfohash(key.ShortInfohash); live != nil && live != t {
+			// t was dropped and the key taken over (see takeOverKey).
+			delete(t.regularTrackerAnnounceState, key)
+			continue
+		}
 		// Avoid clobbering derived and unrelated values (overdue and active).
 		res := me.announceData.Update(
 			key,
@@ -678,7 +698,10 @@ func (me *regularTrackerAnnounceDispatcher) singleAnnounce(
 			}
 		}
 	})
-	t.addPeers(peerInfos(nil).AppendFromTracker(resp.Peers))
+	// t may have been dropped and added again while the announce was out.
+	if live := me.torrentFromShortInfohash(key.ShortInfohash); live != nil {
+		live.addPeers(peerInfos(nil).AppendFromTracker(resp.Peers))
+	}
 }
 
 // Updates the announce state, shared by regularTrackerAnnounceDispatcher and Torrent, but it lives in Torrent
@@ -857,7 +880,9 @@ func (me *regularTrackerAnnounceDispatcher) nextAnnounceEvent(key torrentTracker
 	if !state.sentCompleted && t.sawInitiallyIncompleteData && t.haveAllPieces() {
 		return tracker.Completed, time.Now()
 	}
-	if lastOk.Completed.IsZero() {
+	// A stopped can land after the torrent was added again (see takeOverKey), and the tracker has
+	// forgotten us then.
+	if lastOk.Completed.IsZero() || lastOk.AnnouncedEvent == tracker.Stopped {
 		// Returning now should be fine as sorting should occur on "overdue" derived value.
 		return tracker.Started, time.Now()
 	}
