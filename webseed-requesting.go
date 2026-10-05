@@ -64,11 +64,20 @@ func (cl *Client) updateWebseedRequests() {
 	g.MakeMapIfNil(&cl.aprioriMap)
 	aprioriMap := cl.aprioriMap
 	clear(aprioriMap)
+	// Existing requests whose slice holds a piece of higher priority than the one they are at. A
+	// request reads its slice in order, so that piece would wait until the request gets there, or
+	// never get it if the request is already past it, as after a reader seeks.
+	var outranked map[webseedUniqueRequestKey]struct{}
 	for uniqueKey, value := range cl.iterPossibleWebseedRequests() {
 		//if len(aprioriMap) >= webseedHostRequestConcurrency {
 		//	break
 		//}
-		if g.MapContains(existingRequests, uniqueKey) {
+		if existing, ok := existingRequests[uniqueKey]; ok {
+			wr := existing.existingWebseedRequest
+			if value.priority > existing.priority && wr.next < wr.end {
+				g.MakeMapIfNil(&outranked)
+				outranked[uniqueKey] = struct{}{}
+			}
 			continue
 		}
 		cur, ok := aprioriMap[uniqueKey]
@@ -120,8 +129,9 @@ func (cl *Client) updateWebseedRequests() {
 
 	// Add remaining existing requests.
 	for key, value := range existingRequests {
-		// Don't reconsider existing requests that aren't wanted anymore.
-		if key.t.dataDownloadDisallowed.IsSet() {
+		// Don't reconsider existing requests that aren't wanted anymore. An outranked one is
+		// cancelled, and a request from the piece that outranks it follows once it has gone.
+		if key.t.dataDownloadDisallowed.IsSet() || g.MapContains(outranked, key) {
 			continue
 		}
 		wr := value.existingWebseedRequest

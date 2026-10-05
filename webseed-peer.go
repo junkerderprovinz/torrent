@@ -272,10 +272,13 @@ func (ws *webseedPeer) sliceProcessor(webseedRequest *webseedRequest) {
 		torrent.Add("webseed request error count", 1)
 		// This used to occur only on webseed.ErrTooFast but I think it makes sense to slow down any
 		// kind of error. Pausing here will starve the available requester slots which slows things
-		// down. TODO: Use the Retry-After implementation from Erigon.
-		select {
-		case <-ws.peer.closed.Done():
-		case <-time.After(time.Duration(rand.Int63n(int64(10 * time.Second)))):
+		// down. TODO: Use the Retry-After implementation from Erigon. A request we cancelled is
+		// no fault of the webseed's, and its slice gets no new request until it has gone.
+		if !webseedRequest.cancelled.Load() {
+			select {
+			case <-ws.peer.closed.Done():
+			case <-time.After(time.Duration(rand.Int63n(int64(10 * time.Second)))):
+			}
 		}
 	}
 	ws.slogger().Debug("webseed request ended")
