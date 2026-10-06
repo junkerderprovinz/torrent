@@ -55,7 +55,17 @@ type regularTrackerAnnounceDispatcher struct {
 
 	timer                      mytimer.Timer
 	pendingTorrentInputUpdates map[*Torrent]struct{}
+
+	// Every announce runs under closeCtx, which ends when the client has closed, so none goes out
+	// after that.
+	closeCtx       context.Context
+	closeAnnounces context.CancelFunc
+	// Closed once no stopped announce is left to send, while the client closes.
+	stoppedSent chan struct{}
 }
+
+// How long closing the client waits for the stopped announces of its torrents.
+const stoppedAnnounceGrace = 3 * time.Second
 
 type announceDataRow = indexed.Pair[torrentTrackerAnnouncerKey, nextAnnounceInput]
 
@@ -90,6 +100,7 @@ func (me *regularTrackerAnnounceDispatcher) init(client *Client) {
 	me.logger = client.slogger
 	me.initTables()
 	g.MakeMap(&me.pendingTorrentInputUpdates)
+	me.closeCtx, me.closeAnnounces = context.WithCancel(context.Background())
 	me.initTimer()
 }
 
@@ -435,8 +446,49 @@ func (me *regularTrackerAnnounceDispatcher) step() mytimer.TimeValue {
 		}
 	}
 	me.dispatchAnnounces()
+	me.noteStoppedSent()
 	// We *are* the Sen... Timer.
 	return me.nextTimerDelay()
+}
+
+// Dispatches the stopped announces of the torrents the closing client has dropped. The returned
+// channel is closed once they are all done.
+func (me *regularTrackerAnnounceDispatcher) sendStopped() <-chan struct{} {
+	sent := make(chan struct{})
+	me.stoppedSent = sent
+	me.step()
+	me.updateTimer()
+	return sent
+}
+
+func (me *regularTrackerAnnounceDispatcher) noteStoppedSent() {
+	if me.stoppedSent == nil {
+		return
+	}
+	for r := range me.announceIndex.Iter {
+		if r.AnnounceEvent == tracker.Stopped {
+			return
+		}
+	}
+	close(me.stoppedSent)
+	me.stoppedSent = nil
+}
+
+// Waits up to stoppedAnnounceGrace for the stopped announces, then ends the announces still out and
+// closes the tracker clients, whose UDP sockets stay open until then. Nothing may go out after
+// Client.Close returns, since the caller may rebind the sockets TrackerDialContext and
+// TrackerListenPacket hand out.
+func (me *regularTrackerAnnounceDispatcher) close(stoppedSent <-chan struct{}) {
+	select {
+	case <-stoppedSent:
+	case <-time.After(stoppedAnnounceGrace):
+	}
+	me.torrentClient.lock()
+	defer me.torrentClient.unlock()
+	me.closeAnnounces()
+	for _, v := range me.trackerClients {
+		v.client.Close()
+	}
 }
 
 func (me *regularTrackerAnnounceDispatcher) addKey(key torrentTrackerAnnouncerKey) bool {
@@ -557,6 +609,7 @@ func (me *regularTrackerAnnounceDispatcher) finishedAnnounce(key torrentTrackerA
 	me.trackerAnnouncing.Update(key.url, func(i int) int {
 		return i - 1
 	})
+	me.noteStoppedSent()
 	me.updateTimer()
 }
 
@@ -632,7 +685,7 @@ func (me *regularTrackerAnnounceDispatcher) singleAnnounce(
 	logger = logger.With(t.slogGroup())
 	req := t.announceRequest(event, key.ShortInfohash)
 	me.torrentClient.unlock()
-	ctx, cancel := context.WithTimeout(context.TODO(), tracker.DefaultTrackerAnnounceTimeout)
+	ctx, cancel := context.WithTimeout(me.closeCtx, tracker.DefaultTrackerAnnounceTimeout)
 	defer cancel()
 	logger.Debug("announcing", "req", req)
 	resp, err := me.trackerClients[key.url].client.Announce(ctx, req, me.getAnnounceOpts())
