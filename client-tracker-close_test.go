@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"net"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -114,5 +115,19 @@ func TestClosingTheClientAnnouncesNothingOnceItReturns(t *testing.T) {
 	cl.Close()
 	qt.Check(t, qt.DeepEquals(tr.seen(), []string{"started", "stopped"}))
 	time.Sleep(1500 * time.Millisecond)
+	qt.Check(t, qt.DeepEquals(tr.seen(), []string{"started", "stopped"}))
+}
+
+func TestClosingTheClientWhileTheStartedIsOutStillSendsStopped(t *testing.T) {
+	release := make(chan struct{})
+	tr := &eventTracker{interval: "3600", hold: map[string]chan struct{}{"started": release}}
+	cl, add := newEventTrackerClient(t, tr)
+	to := add()
+	qt.Assert(t, qt.IsTrue(eventually(func() bool { return len(tr.seen()) == 1 })))
+	to.Drop()
+	// The tracker answers the started once Close is waiting, and nothing outside the client holds
+	// the dropped torrent by then.
+	time.AfterFunc(500*time.Millisecond, func() { runtime.GC(); close(release) })
+	cl.Close()
 	qt.Check(t, qt.DeepEquals(tr.seen(), []string{"started", "stopped"}))
 }

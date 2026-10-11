@@ -37,6 +37,9 @@ type regularTrackerAnnounceDispatcher struct {
 	// short infohash forms to the same value. We're using weak.Pointer because we need to clean it
 	// up at some point, if this crashes I know to fix it.
 	torrentForAnnounceRequests map[shortInfohash]weak.Pointer[Torrent]
+	// Dropped torrents that still have announce data, held so their stopped announce can be built
+	// after the caller has let go of them.
+	dropped map[shortInfohash]*Torrent
 
 	// Raw announce data keyed by announcer and short infohash.
 	announceData indexed.Map[torrentTrackerAnnouncerKey, nextAnnounceInput]
@@ -465,8 +468,9 @@ func (me *regularTrackerAnnounceDispatcher) noteStoppedSent() {
 	if me.stoppedSent == nil {
 		return
 	}
+	// An announce still out can come back and leave a dropped torrent with a stopped to send.
 	for r := range me.announceIndex.Iter {
-		if r.AnnounceEvent == tracker.Stopped {
+		if r.active || r.AnnounceEvent == tracker.Stopped {
 			return
 		}
 	}
@@ -522,6 +526,7 @@ func (me *regularTrackerAnnounceDispatcher) addKey(key torrentTrackerAnnouncerKe
 // that is collected, not at all. t starts over with a started announce of its own.
 func (me *regularTrackerAnnounceDispatcher) takeOverKey(key torrentTrackerAnnouncerKey, t *Torrent) {
 	me.torrentForAnnounceRequests[key.ShortInfohash] = weak.Make(t)
+	delete(me.dropped, key.ShortInfohash)
 	me.announceStates[key] = g.PtrTo(announceState{})
 	panicif.False(me.announceData.Update(key, func(av nextAnnounceInput) nextAnnounceInput {
 		av.torrent = me.makeTorrentInput(t)
@@ -636,6 +641,14 @@ func (me *regularTrackerAnnounceDispatcher) forgetIfDone(key torrentTrackerAnnou
 	}
 	me.announceData.Delete(key)
 	delete(me.announceStates, key)
+	start := me.announceData.MinRecord()
+	start.Left.ShortInfohash = key.ShortInfohash
+	for range indexed.IterClusteredWhere(me.announceData, start, func(p announceDataRow) bool {
+		return p.Left.ShortInfohash == key.ShortInfohash
+	}) {
+		return
+	}
+	delete(me.dropped, key.ShortInfohash)
 }
 
 func (me *regularTrackerAnnounceDispatcher) syncAnnounceState(key torrentTrackerAnnouncerKey) {
@@ -671,6 +684,10 @@ func (me *regularTrackerAnnounceDispatcher) updateTorrentInput(t *Torrent) {
 			panicif.False(t.isDropped())
 			delete(t.regularTrackerAnnounceState, key)
 			continue
+		}
+		if t.isDropped() {
+			g.MakeMapIfNil(&me.dropped)
+			me.dropped[key.ShortInfohash] = t
 		}
 		me.forgetIfDone(key)
 	}
