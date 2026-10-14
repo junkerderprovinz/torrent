@@ -29,6 +29,8 @@ type NewClientOpts struct {
 	Logger  log.Logger
 	Slogger *slog.Logger
 	ListenPacket func(network, addr string) (net.PacketConn, error)
+	// Resolves a UDP tracker's host in place of the system resolver.
+	LookupHost func(ctx context.Context, host string) ([]string, error)
 }
 
 func (opts NewClientOpts) slogger() *slog.Logger {
@@ -59,6 +61,7 @@ func NewClient(urlStr string, opts NewClientOpts) (Client, error) {
 			Host:         _url.Host,
 			Logger:       opts.slogger(),
 			ListenPacket: opts.ListenPacket,
+			LookupHost:   opts.LookupHost,
 		})
 		if err != nil {
 			return nil, err

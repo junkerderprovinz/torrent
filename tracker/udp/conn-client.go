@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"time"
 
 	"github.com/anacrolix/missinggo/v2"
 )
@@ -21,6 +22,9 @@ type NewConnClientOpts struct {
 	Logger *slog.Logger
 	// Custom function to use as a substitute for net.ListenPacket
 	ListenPacket listenPacketFunc
+	// Resolves the tracker's host in place of the system resolver, so a packet socket bound to a
+	// tunnel does not have its tracker names looked up outside it.
+	LookupHost func(ctx context.Context, host string) ([]string, error)
 }
 
 // Manages a Client with a specific connection.
@@ -73,17 +77,41 @@ func ipv6(opt *bool, network string, remoteAddr net.Addr) bool {
 
 // Allows a UDP Client to write packets to an endpoint without knowing about the network specifics.
 type clientWriter struct {
-	pc      net.PacketConn
-	network string
-	address string
+	pc         net.PacketConn
+	network    string
+	address    string
+	lookupHost func(ctx context.Context, host string) ([]string, error)
 }
 
 func (me clientWriter) Write(p []byte) (n int, err error) {
-	addr, err := net.ResolveUDPAddr(me.network, me.address)
+	addr, err := me.resolve()
 	if err != nil {
 		return
 	}
 	return me.pc.WriteTo(p, addr)
+}
+
+func (me clientWriter) resolve() (*net.UDPAddr, error) {
+	if me.lookupHost == nil {
+		return net.ResolveUDPAddr(me.network, me.address)
+	}
+	host, port, err := net.SplitHostPort(me.address)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	hosts, err := me.lookupHost(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	for _, h := range hosts {
+		addr, err := net.ResolveUDPAddr(me.network, net.JoinHostPort(h, port))
+		if err == nil {
+			return addr, nil
+		}
+	}
+	return nil, &net.DNSError{Err: "no address of the network's family", Name: host, IsNotFound: true}
 }
 
 func NewConnClient(opts NewConnClientOpts) (cc *ConnClient, err error) {
@@ -103,9 +131,10 @@ func NewConnClient(opts NewConnClientOpts) (cc *ConnClient, err error) {
 	cc = &ConnClient{
 		Client: Client{
 			Writer: clientWriter{
-				pc:      conn,
-				network: opts.Network,
-				address: opts.Host,
+				pc:         conn,
+				network:    opts.Network,
+				address:    opts.Host,
+				lookupHost: opts.LookupHost,
 			},
 		},
 		conn:    conn,

@@ -1050,6 +1050,7 @@ func (me *regularTrackerAnnounceDispatcher) initTrackerClient(
 		UdpNetwork:   u.Scheme,
 		Slogger:      logger.With("trackerUrl", string(urlStr)),
 		ListenPacket: config.TrackerListenPacket,
+		LookupHost:   config.TrackerLookupHost,
 	})
 	panicif.Err(err)
 	// Need deep copy
@@ -1083,4 +1084,29 @@ func (me *regularTrackerAnnounceDispatcher) pendTorrentInputUpdate(t *Torrent) {
 		return
 	}
 	me.pendingTorrentInputUpdates[t] = struct{}{}
+}
+
+// ReannounceToTrackers has every torrent announce to its trackers now rather than when their
+// intervals run out, so the trackers learn a listening port that changed while torrents run.
+func (cl *Client) ReannounceToTrackers() {
+	cl.lock()
+	defer cl.unlock()
+	cl.regularTrackerAnnounceDispatcher.reannounceAt(time.Now())
+}
+
+// An announce already out keeps the request it was sent with, and the interval its tracker
+// answers with replaces the one cut short here.
+func (me *regularTrackerAnnounceDispatcher) reannounceAt(now time.Time) {
+	for key, state := range me.announceStates {
+		ok := &state.lastOk
+		if ok.Completed.IsZero() || ok.AnnouncedEvent == tracker.Stopped || !ok.Completed.Add(ok.Interval).After(now) {
+			continue
+		}
+		if me.torrentFromShortInfohash(key.ShortInfohash) == nil {
+			continue
+		}
+		ok.Interval = now.Sub(ok.Completed)
+		me.syncAnnounceState(key)
+	}
+	me.updateTimer()
 }
